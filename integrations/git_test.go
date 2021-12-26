@@ -7,10 +7,10 @@ package integrations
 import (
 	"encoding/hex"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -18,6 +18,10 @@ import (
 	"time"
 
 	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/perm"
+	repo_model "code.gitea.io/gitea/models/repo"
+	"code.gitea.io/gitea/models/unittest"
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/git"
 	"code.gitea.io/gitea/modules/lfs"
 	"code.gitea.io/gitea/modules/setting"
@@ -51,12 +55,12 @@ func testGit(t *testing.T, u *url.URL) {
 		httpContext.Reponame = "repo-tmp-17"
 		forkedUserCtx.Reponame = httpContext.Reponame
 
-		dstPath, err := ioutil.TempDir("", httpContext.Reponame)
+		dstPath, err := os.MkdirTemp("", httpContext.Reponame)
 		assert.NoError(t, err)
 		defer util.RemoveAll(dstPath)
 
 		t.Run("CreateRepoInDifferentUser", doAPICreateRepository(forkedUserCtx, false))
-		t.Run("AddUserAsCollaborator", doAPIAddCollaborator(forkedUserCtx, httpContext.Username, models.AccessModeRead))
+		t.Run("AddUserAsCollaborator", doAPIAddCollaborator(forkedUserCtx, httpContext.Username, perm.AccessModeRead))
 
 		t.Run("ForkFromDifferentUser", doAPIForkRepository(httpContext, forkedUserCtx.Username))
 
@@ -89,7 +93,7 @@ func testGit(t *testing.T, u *url.URL) {
 		keyname := "my-testing-key"
 		forkedUserCtx.Reponame = sshContext.Reponame
 		t.Run("CreateRepoInDifferentUser", doAPICreateRepository(forkedUserCtx, false))
-		t.Run("AddUserAsCollaborator", doAPIAddCollaborator(forkedUserCtx, sshContext.Username, models.AccessModeRead))
+		t.Run("AddUserAsCollaborator", doAPIAddCollaborator(forkedUserCtx, sshContext.Username, perm.AccessModeRead))
 		t.Run("ForkFromDifferentUser", doAPIForkRepository(sshContext, forkedUserCtx.Username))
 
 		//Setup key the user ssh key
@@ -101,7 +105,7 @@ func testGit(t *testing.T, u *url.URL) {
 			sshURL := createSSHUrl(sshContext.GitPath(), u)
 
 			//Setup clone folder
-			dstPath, err := ioutil.TempDir("", sshContext.Reponame)
+			dstPath, err := os.MkdirTemp("", sshContext.Reponame)
 			assert.NoError(t, err)
 			defer util.RemoveAll(dstPath)
 
@@ -127,7 +131,7 @@ func testGit(t *testing.T, u *url.URL) {
 }
 
 func ensureAnonymousClone(t *testing.T, u *url.URL) {
-	dstLocalPath, err := ioutil.TempDir("", "repo1")
+	dstLocalPath, err := os.MkdirTemp("", "repo1")
 	assert.NoError(t, err)
 	defer util.RemoveAll(dstLocalPath)
 	t.Run("CloneAnonymous", doGitClone(dstLocalPath, u))
@@ -310,7 +314,7 @@ func generateCommitWithNewData(size int, repoPath, email, fullName, prefix strin
 
 	buffer := make([]byte, bufSize)
 
-	tmpFile, err := ioutil.TempFile(repoPath, prefix)
+	tmpFile, err := os.CreateTemp(repoPath, prefix)
 	if err != nil {
 		return "", err
 	}
@@ -414,7 +418,7 @@ func doBranchProtectPRMerge(baseCtx *APITestContext, dstPath string) func(t *tes
 	}
 }
 
-func doProtectBranch(ctx APITestContext, branch string, userToWhitelist string, unprotectedFilePatterns string) func(t *testing.T) {
+func doProtectBranch(ctx APITestContext, branch, userToWhitelist, unprotectedFilePatterns string) func(t *testing.T) {
 	// We are going to just use the owner to set the protection.
 	return func(t *testing.T) {
 		csrf := GetCSRF(t, ctx.Session, fmt.Sprintf("/%s/%s/settings/branches", url.PathEscape(ctx.Username), url.PathEscape(ctx.Reponame)))
@@ -428,7 +432,7 @@ func doProtectBranch(ctx APITestContext, branch string, userToWhitelist string, 
 			})
 			ctx.Session.MakeRequest(t, req, http.StatusFound)
 		} else {
-			user, err := models.GetUserByName(userToWhitelist)
+			user, err := user_model.GetUserByName(userToWhitelist)
 			assert.NoError(t, err)
 			// Change branch to protected
 			req := NewRequestWithValues(t, "POST", fmt.Sprintf("/%s/%s/settings/branches/%s", url.PathEscape(ctx.Username), url.PathEscape(ctx.Reponame), url.PathEscape(branch)), map[string]string{
@@ -557,7 +561,7 @@ func doPushCreate(ctx APITestContext, u *url.URL) func(t *testing.T) {
 		u.Path = ctx.GitPath()
 
 		// Create a temporary directory
-		tmpDir, err := ioutil.TempDir("", ctx.Reponame)
+		tmpDir, err := os.MkdirTemp("", ctx.Reponame)
 		assert.NoError(t, err)
 		defer util.RemoveAll(tmpDir)
 
@@ -579,7 +583,7 @@ func doPushCreate(ctx APITestContext, u *url.URL) func(t *testing.T) {
 		t.Run("SuccessfullyPushAndCreateTestRepository", doGitPushTestRepository(tmpDir, "origin", "master"))
 
 		// Finally, fetch repo from database and ensure the correct repository has been created
-		repo, err := models.GetRepositoryByOwnerAndName(ctx.Username, ctx.Reponame)
+		repo, err := repo_model.GetRepositoryByOwnerAndName(ctx.Username, ctx.Reponame)
 		assert.NoError(t, err)
 		assert.False(t, repo.IsEmpty)
 		assert.True(t, repo.IsPrivate)
@@ -625,17 +629,17 @@ func doCreateAgitFlowPull(dstPath string, ctx *APITestContext, baseBranch, headB
 			pr1, pr2 *models.PullRequest
 			commit   string
 		)
-		repo, err := models.GetRepositoryByOwnerAndName(ctx.Username, ctx.Reponame)
+		repo, err := repo_model.GetRepositoryByOwnerAndName(ctx.Username, ctx.Reponame)
 		if !assert.NoError(t, err) {
 			return
 		}
 
-		pullNum := models.GetCount(t, &models.PullRequest{})
+		pullNum := unittest.GetCount(t, &models.PullRequest{})
 
 		t.Run("CreateHeadBranch", doGitCreateBranch(dstPath, headBranch))
 
 		t.Run("AddCommit", func(t *testing.T) {
-			err := ioutil.WriteFile(path.Join(dstPath, "test_file"), []byte("## test content"), 0666)
+			err := os.WriteFile(path.Join(dstPath, "test_file"), []byte("## test content"), 0666)
 			if !assert.NoError(t, err) {
 				return
 			}
@@ -666,8 +670,8 @@ func doCreateAgitFlowPull(dstPath string, ctx *APITestContext, baseBranch, headB
 			if !assert.NoError(t, err) {
 				return
 			}
-			models.AssertCount(t, &models.PullRequest{}, pullNum+1)
-			pr1 = models.AssertExistsAndLoadBean(t, &models.PullRequest{
+			unittest.AssertCount(t, &models.PullRequest{}, pullNum+1)
+			pr1 = unittest.AssertExistsAndLoadBean(t, &models.PullRequest{
 				HeadRepoID: repo.ID,
 				Flow:       models.PullRequestFlowAGit,
 			}).(*models.PullRequest)
@@ -687,8 +691,8 @@ func doCreateAgitFlowPull(dstPath string, ctx *APITestContext, baseBranch, headB
 			if !assert.NoError(t, err) {
 				return
 			}
-			models.AssertCount(t, &models.PullRequest{}, pullNum+2)
-			pr2 = models.AssertExistsAndLoadBean(t, &models.PullRequest{
+			unittest.AssertCount(t, &models.PullRequest{}, pullNum+2)
+			pr2 = unittest.AssertExistsAndLoadBean(t, &models.PullRequest{
 				HeadRepoID: repo.ID,
 				Index:      pr1.Index + 1,
 				Flow:       models.PullRequestFlowAGit,
@@ -709,7 +713,7 @@ func doCreateAgitFlowPull(dstPath string, ctx *APITestContext, baseBranch, headB
 		}
 
 		t.Run("AddCommit2", func(t *testing.T) {
-			err := ioutil.WriteFile(path.Join(dstPath, "test_file"), []byte("## test content \n ## test content 2"), 0666)
+			err := os.WriteFile(path.Join(dstPath, "test_file"), []byte("## test content \n ## test content 2"), 0666)
 			if !assert.NoError(t, err) {
 				return
 			}
@@ -740,7 +744,7 @@ func doCreateAgitFlowPull(dstPath string, ctx *APITestContext, baseBranch, headB
 			if !assert.NoError(t, err) {
 				return
 			}
-			models.AssertCount(t, &models.PullRequest{}, pullNum+2)
+			unittest.AssertCount(t, &models.PullRequest{}, pullNum+2)
 			prMsg, err := doAPIGetPullRequest(*ctx, ctx.Username, ctx.Reponame, pr1.Index)(t)
 			if !assert.NoError(t, err) {
 				return
@@ -752,7 +756,7 @@ func doCreateAgitFlowPull(dstPath string, ctx *APITestContext, baseBranch, headB
 			if !assert.NoError(t, err) {
 				return
 			}
-			models.AssertCount(t, &models.PullRequest{}, pullNum+2)
+			unittest.AssertCount(t, &models.PullRequest{}, pullNum+2)
 			prMsg, err = doAPIGetPullRequest(*ctx, ctx.Username, ctx.Reponame, pr2.Index)(t)
 			if !assert.NoError(t, err) {
 				return

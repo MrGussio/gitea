@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"net"
 	"net/url"
@@ -40,11 +39,11 @@ type Scheme string
 
 // enumerates all the scheme types
 const (
-	HTTP       Scheme = "http"
-	HTTPS      Scheme = "https"
-	FCGI       Scheme = "fcgi"
-	FCGIUnix   Scheme = "fcgi+unix"
-	UnixSocket Scheme = "unix"
+	HTTP     Scheme = "http"
+	HTTPS    Scheme = "https"
+	FCGI     Scheme = "fcgi"
+	FCGIUnix Scheme = "fcgi+unix"
+	HTTPUnix Scheme = "http+unix"
 )
 
 // LandingPage describes the default page
@@ -115,6 +114,10 @@ var (
 	LetsEncryptTOS       bool
 	LetsEncryptDirectory string
 	LetsEncryptEmail     string
+	SSLMinimumVersion    string
+	SSLMaximumVersion    string
+	SSLCurvePreferences  []string
+	SSLCipherSuites      []string
 	GracefulRestartable  bool
 	GracefulHammerTime   time.Duration
 	StartupTimeout       time.Duration
@@ -256,8 +259,8 @@ var (
 		ReactionMaxUserNum:  10,
 		ThemeColorMetaTag:   `#6cc644`,
 		MaxDisplayFileSize:  8388608,
-		DefaultTheme:        `gitea`,
-		Themes:              []string{`gitea`, `arc-green`},
+		DefaultTheme:        `auto`,
+		Themes:              []string{`auto`, `gitea`, `arc-green`},
 		Reactions:           []string{`+1`, `-1`, `laugh`, `hooray`, `confused`, `heart`, `rocket`, `eyes`},
 		CustomEmojis:        []string{`git`, `gitea`, `codeberg`, `gitlab`, `github`, `gogs`},
 		CustomEmojisMap:     map[string]string{"git": ":git:", "gitea": ":gitea:", "codeberg": ":codeberg:", "gitlab": ":gitlab:", "github": ":github:", "gogs": ":gogs:"},
@@ -391,11 +394,15 @@ var (
 
 	// Metrics settings
 	Metrics = struct {
-		Enabled bool
-		Token   string
+		Enabled                  bool
+		Token                    string
+		EnabledIssueByLabel      bool
+		EnabledIssueByRepository bool
 	}{
-		Enabled: false,
-		Token:   "",
+		Enabled:                  false,
+		Token:                    "",
+		EnabledIssueByLabel:      false,
+		EnabledIssueByRepository: false,
 	}
 
 	// I18n settings
@@ -416,16 +423,12 @@ var (
 	PIDFile       = "/run/gitea.pid"
 	WritePIDFile  bool
 	RunMode       string
+	IsProd        bool
 	RunUser       string
 	IsWindows     bool
 	HasRobotsTxt  bool
 	InternalToken string // internal access token
 )
-
-// IsProd if it's a production mode
-func IsProd() bool {
-	return strings.EqualFold(RunMode, "prod")
-}
 
 func getAppPath() (string, error) {
 	var appPath string
@@ -543,9 +546,27 @@ func SetCustomPathAndConf(providedCustom, providedConf, providedWorkPath string)
 	}
 }
 
-// NewContext initializes configuration context.
+// LoadFromExisting initializes setting options from an existing config file (app.ini)
+func LoadFromExisting() {
+	loadFromConf(false, "")
+}
+
+// LoadAllowEmpty initializes setting options, it's also fine that if the config file (app.ini) doesn't exist
+func LoadAllowEmpty() {
+	loadFromConf(true, "")
+}
+
+// LoadForTest initializes setting options for tests
+func LoadForTest(extraConfigs ...string) {
+	loadFromConf(true, strings.Join(extraConfigs, "\n"))
+	if err := PrepareAppDataPath(); err != nil {
+		log.Fatal("Can not prepare APP_DATA_PATH: %v", err)
+	}
+}
+
+// loadFromConf initializes configuration context.
 // NOTE: do not print any log except error.
-func NewContext() {
+func loadFromConf(allowEmpty bool, extraConfig string) {
 	Cfg = ini.Empty()
 
 	if WritePIDFile && len(PIDFile) > 0 {
@@ -560,9 +581,16 @@ func NewContext() {
 		if err := Cfg.Append(CustomConf); err != nil {
 			log.Fatal("Failed to load custom conf '%s': %v", CustomConf, err)
 		}
-	} else {
-		log.Warn("Custom config '%s' not found, ignore this if you're running first time", CustomConf)
+	} else if !allowEmpty {
+		log.Fatal("Unable to find configuration file: %q.\nEnsure you are running in the correct environment or set the correct configuration file with -c.", CustomConf)
+	} // else: no config file, a config file might be created at CustomConf later (might not)
+
+	if extraConfig != "" {
+		if err = Cfg.Append([]byte(extraConfig)); err != nil {
+			log.Fatal("Unable to append more config: %v", err)
+		}
 	}
+
 	Cfg.NameMapper = ini.SnackCase
 
 	homeDir, err := com.HomeDir()
@@ -580,8 +608,13 @@ func NewContext() {
 	sec := Cfg.Section("server")
 	AppName = Cfg.Section("").Key("APP_NAME").MustString("Gitea: Git with a cup of tea")
 
+	Domain = sec.Key("DOMAIN").MustString("localhost")
+	HTTPAddr = sec.Key("HTTP_ADDR").MustString("0.0.0.0")
+	HTTPPort = sec.Key("HTTP_PORT").MustString("3000")
+
 	Protocol = HTTP
-	switch sec.Key("PROTOCOL").String() {
+	protocolCfg := sec.Key("PROTOCOL").String()
+	switch protocolCfg {
 	case "https":
 		Protocol = HTTPS
 		CertFile = sec.Key("CERT_FILE").String()
@@ -594,22 +627,26 @@ func NewContext() {
 		}
 	case "fcgi":
 		Protocol = FCGI
-	case "fcgi+unix":
-		Protocol = FCGIUnix
+	case "fcgi+unix", "unix", "http+unix":
+		switch protocolCfg {
+		case "fcgi+unix":
+			Protocol = FCGIUnix
+		case "unix":
+			log.Warn("unix PROTOCOL value is deprecated, please use http+unix")
+			fallthrough
+		case "http+unix":
+			Protocol = HTTPUnix
+		}
 		UnixSocketPermissionRaw := sec.Key("UNIX_SOCKET_PERMISSION").MustString("666")
 		UnixSocketPermissionParsed, err := strconv.ParseUint(UnixSocketPermissionRaw, 8, 32)
 		if err != nil || UnixSocketPermissionParsed > 0777 {
 			log.Fatal("Failed to parse unixSocketPermission: %s", UnixSocketPermissionRaw)
 		}
+
 		UnixSocketPermission = uint32(UnixSocketPermissionParsed)
-	case "unix":
-		Protocol = UnixSocket
-		UnixSocketPermissionRaw := sec.Key("UNIX_SOCKET_PERMISSION").MustString("666")
-		UnixSocketPermissionParsed, err := strconv.ParseUint(UnixSocketPermissionRaw, 8, 32)
-		if err != nil || UnixSocketPermissionParsed > 0777 {
-			log.Fatal("Failed to parse unixSocketPermission: %s", UnixSocketPermissionRaw)
+		if !filepath.IsAbs(HTTPAddr) {
+			HTTPAddr = filepath.Join(AppWorkPath, HTTPAddr)
 		}
-		UnixSocketPermission = uint32(UnixSocketPermissionParsed)
 	}
 	EnableLetsEncrypt = sec.Key("ENABLE_LETSENCRYPT").MustBool(false)
 	LetsEncryptTOS = sec.Key("LETSENCRYPT_ACCEPTTOS").MustBool(false)
@@ -619,9 +656,10 @@ func NewContext() {
 	}
 	LetsEncryptDirectory = sec.Key("LETSENCRYPT_DIRECTORY").MustString("https")
 	LetsEncryptEmail = sec.Key("LETSENCRYPT_EMAIL").MustString("")
-	Domain = sec.Key("DOMAIN").MustString("localhost")
-	HTTPAddr = sec.Key("HTTP_ADDR").MustString("0.0.0.0")
-	HTTPPort = sec.Key("HTTP_PORT").MustString("3000")
+	SSLMinimumVersion = sec.Key("SSL_MIN_VERSION").MustString("")
+	SSLMaximumVersion = sec.Key("SSL_MAX_VERSION").MustString("")
+	SSLCurvePreferences = sec.Key("SSL_CURVE_PREFERENCES").Strings(",")
+	SSLCipherSuites = sec.Key("SSL_CIPHER_SUITES").Strings(",")
 	GracefulRestartable = sec.Key("ALLOW_GRACEFUL_RESTARTS").MustBool(true)
 	GracefulHammerTime = sec.Key("GRACEFUL_HAMMER_TIME").MustDuration(60 * time.Second)
 	StartupTimeout = sec.Key("STARTUP_TIMEOUT").MustDuration(0 * time.Second)
@@ -659,7 +697,7 @@ func NewContext() {
 
 	var defaultLocalURL string
 	switch Protocol {
-	case UnixSocket:
+	case HTTPUnix:
 		defaultLocalURL = "http://unix/"
 	case FCGI:
 		defaultLocalURL = AppURL
@@ -684,6 +722,7 @@ func NewContext() {
 	StaticRootPath = sec.Key("STATIC_ROOT_PATH").MustString(StaticRootPath)
 	StaticCacheTime = sec.Key("STATIC_CACHE_TIME").MustDuration(6 * time.Hour)
 	AppDataPath = sec.Key("APP_DATA_PATH").MustString(path.Join(AppWorkPath, "data"))
+
 	EnableGzip = sec.Key("ENABLE_GZIP").MustBool()
 	EnablePprof = sec.Key("ENABLE_PPROF").MustBool(false)
 	PprofDataPath = sec.Key("PPROF_DATA_PATH").MustString(path.Join(AppWorkPath, "data/tmp/pprof"))
@@ -764,7 +803,7 @@ func NewContext() {
 
 		if len(trustedUserCaKeys) > 0 && SSH.AuthorizedPrincipalsEnabled {
 			fname := sec.Key("SSH_TRUSTED_USER_CA_KEYS_FILENAME").MustString(filepath.Join(SSH.RootPath, "gitea-trusted-user-ca-keys.pem"))
-			if err := ioutil.WriteFile(fname,
+			if err := os.WriteFile(fname,
 				[]byte(strings.Join(trustedUserCaKeys, "\n")), 0600); err != nil {
 				log.Fatal("Failed to create '%s': %v", fname, err)
 			}
@@ -838,6 +877,10 @@ func NewContext() {
 	SuccessfulTokensCacheSize = sec.Key("SUCCESSFUL_TOKENS_CACHE_SIZE").MustInt(20)
 
 	InternalToken = loadInternalToken(sec)
+	if InstallLock && InternalToken == "" {
+		// if Gitea has been installed but the InternalToken hasn't been generated (upgrade from an old release), we should generate
+		generateSaveInternalToken()
+	}
 
 	cfgdata := sec.Key("PASSWORD_COMPLEXITY").Strings(",")
 	if len(cfgdata) == 0 {
@@ -899,13 +942,26 @@ func NewContext() {
 	}
 
 	RunUser = Cfg.Section("").Key("RUN_USER").MustString(user.CurrentUsername())
+	// The following is a purposefully undocumented option. Please do not run Gitea as root. It will only cause future headaches.
+	// Please don't use root as a bandaid to "fix" something that is broken, instead the broken thing should instead be fixed properly.
+	unsafeAllowRunAsRoot := Cfg.Section("").Key("I_AM_BEING_UNSAFE_RUNNING_AS_ROOT").MustBool(false)
 	RunMode = Cfg.Section("").Key("RUN_MODE").MustString("prod")
+	IsProd = strings.EqualFold(RunMode, "prod")
 	// Does not check run user when the install lock is off.
 	if InstallLock {
 		currentUser, match := IsRunUserMatchCurrentUser(RunUser)
 		if !match {
 			log.Fatal("Expect user '%s' but current user is: %s", RunUser, currentUser)
 		}
+	}
+
+	// check if we run as root
+	if os.Getuid() == 0 {
+		if !unsafeAllowRunAsRoot {
+			// Special thanks to VLC which inspired the wording of this messaging.
+			log.Fatal("Gitea is not supposed to be run as root. Sorry. If you need to use privileged TCP ports please instead use setcap and the `cap_net_bind_service` permission")
+		}
+		log.Critical("You are running Gitea using the root user, and have purposely chosen to skip built-in protections around this. You have been warned against this.")
 	}
 
 	SSH.BuiltinServerUser = Cfg.Section("server").Key("BUILTIN_SSH_SERVER_USER").MustString(RunUser)
@@ -936,19 +992,11 @@ func NewContext() {
 
 	Langs = Cfg.Section("i18n").Key("LANGS").Strings(",")
 	if len(Langs) == 0 {
-		Langs = []string{
-			"en-US", "zh-CN", "zh-HK", "zh-TW", "de-DE", "fr-FR", "nl-NL", "lv-LV",
-			"ru-RU", "uk-UA", "ja-JP", "es-ES", "pt-BR", "pt-PT", "pl-PL", "bg-BG",
-			"it-IT", "fi-FI", "tr-TR", "cs-CZ", "sr-SP", "sv-SE", "ko-KR", "el-GR",
-			"fa-IR", "hu-HU", "id-ID", "ml-IN"}
+		Langs = defaultI18nLangs()
 	}
 	Names = Cfg.Section("i18n").Key("NAMES").Strings(",")
 	if len(Names) == 0 {
-		Names = []string{"English", "简体中文", "繁體中文（香港）", "繁體中文（台灣）", "Deutsch",
-			"français", "Nederlands", "latviešu", "русский", "Українська", "日本語",
-			"español", "português do Brasil", "Português de Portugal", "polski", "български",
-			"italiano", "suomi", "Türkçe", "čeština", "српски", "svenska", "한국어", "ελληνικά",
-			"فارسی", "magyar nyelv", "bahasa Indonesia", "മലയാളം"}
+		Names = defaultI18nNames()
 	}
 
 	ShowFooterBranding = Cfg.Section("other").Key("SHOW_FOOTER_BRANDING").MustBool(false)
@@ -1015,8 +1063,8 @@ func parseAuthorizedPrincipalsAllow(values []string) ([]string, bool) {
 
 func loadInternalToken(sec *ini.Section) string {
 	uri := sec.Key("INTERNAL_TOKEN_URI").String()
-	if len(uri) == 0 {
-		return loadOrGenerateInternalToken(sec)
+	if uri == "" {
+		return sec.Key("INTERNAL_TOKEN").String()
 	}
 	tempURI, err := url.Parse(uri)
 	if err != nil {
@@ -1030,7 +1078,7 @@ func loadInternalToken(sec *ini.Section) string {
 		}
 		defer fp.Close()
 
-		buf, err := ioutil.ReadAll(fp)
+		buf, err := io.ReadAll(fp)
 		if err != nil {
 			log.Fatal("Failed to read InternalTokenURI (%s): %v", uri, err)
 		}
@@ -1053,25 +1101,21 @@ func loadInternalToken(sec *ini.Section) string {
 	return ""
 }
 
-func loadOrGenerateInternalToken(sec *ini.Section) string {
-	var err error
-	token := sec.Key("INTERNAL_TOKEN").String()
-	if len(token) == 0 {
-		token, err = generate.NewInternalToken()
-		if err != nil {
-			log.Fatal("Error generate internal token: %v", err)
-		}
-
-		// Save secret
-		CreateOrAppendToCustomConf(func(cfg *ini.File) {
-			cfg.Section("security").Key("INTERNAL_TOKEN").SetValue(token)
-		})
+// generateSaveInternalToken generates and saves the internal token to app.ini
+func generateSaveInternalToken() {
+	token, err := generate.NewInternalToken()
+	if err != nil {
+		log.Fatal("Error generate internal token: %v", err)
 	}
-	return token
+
+	InternalToken = token
+	CreateOrAppendToCustomConf(func(cfg *ini.File) {
+		cfg.Section("security").Key("INTERNAL_TOKEN").SetValue(token)
+	})
 }
 
 // MakeAbsoluteAssetURL returns the absolute asset url prefix without a trailing slash
-func MakeAbsoluteAssetURL(appURL string, staticURLPrefix string) string {
+func MakeAbsoluteAssetURL(appURL, staticURLPrefix string) string {
 	parsedPrefix, err := url.Parse(strings.TrimSuffix(staticURLPrefix, "/"))
 	if err != nil {
 		log.Fatal("Unable to parse STATIC_URL_PREFIX: %v", err)
@@ -1090,7 +1134,7 @@ func MakeAbsoluteAssetURL(appURL string, staticURLPrefix string) string {
 }
 
 // MakeManifestData generates web app manifest JSON
-func MakeManifestData(appName string, appURL string, absoluteAssetURL string) []byte {
+func MakeManifestData(appName, appURL, absoluteAssetURL string) []byte {
 	type manifestIcon struct {
 		Src   string `json:"src"`
 		Type  string `json:"type"`
@@ -1147,6 +1191,8 @@ func CreateOrAppendToCustomConf(callback func(cfg *ini.File)) {
 
 	callback(cfg)
 
+	log.Info("Settings saved to: %q", CustomConf)
+
 	if err := os.MkdirAll(filepath.Dir(CustomConf), os.ModePerm); err != nil {
 		log.Fatal("failed to create '%s': %v", CustomConf, err)
 		return
@@ -1189,6 +1235,7 @@ func NewServices() {
 	NewQueueService()
 	newProject()
 	newMimeTypeMap()
+	newFederationService()
 }
 
 // NewServicesForInstall initializes the services for install

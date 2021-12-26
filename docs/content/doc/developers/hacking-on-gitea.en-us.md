@@ -67,13 +67,15 @@ sudo yum install make
 One of these three distributions of Make will run on Windows:
 
 - [Single binary build](http://www.equation.com/servlet/equation.cmd?fa=make). Copy somewhere and add to `PATH`.
-  - [32-bits version](ftp://ftp.equation.com/make/32/make.exe)
-  - [64-bits version](ftp://ftp.equation.com/make/64/make.exe)
-- [MinGW](http://www.mingw.org/) includes a build.
-  - The binary is called `mingw32-make.exe` instead of `make.exe`. Add the `bin` folder to `PATH`.
+  - [32-bits version](http://www.equation.com/ftpdir/make/32/make.exe)
+  - [64-bits version](http://www.equation.com/ftpdir/make/64/make.exe)
+- [MinGW-w64](https://www.mingw-w64.org) / [MSYS2](https://www.msys2.org/).
+  - MSYS2 is a collection of tools and libraries providing you with an easy-to-use environment for building, installing and running native Windows software, it includes MinGW-w64. 
+  - In MingGW-w64, the binary is called `mingw32-make.exe` instead of `make.exe`. Add the `bin` folder to `PATH`.
+  - In MSYS2, you can use `make` directly. See [MSYS2 Porting](https://www.msys2.org/wiki/Porting/).
 - [Chocolatey package](https://chocolatey.org/packages/make). Run `choco install make`
 
-**Note**: If you are attempting to build using make with Windows Command Prompt, you may run into issues. The above prompts (git bash, or mingw) are recommended, however if you only have command prompt (or potentially powershell) you can set environment variables using the [set](https://docs.microsoft.com/en-us/windows-server/administration/windows-commands/set_1) command, e.g. `set TAGS=bindata`.
+**Note**: If you are attempting to build using make with Windows Command Prompt, you may run into issues. The above prompts (Git bash, or MinGW) are recommended, however if you only have command prompt (or potentially PowerShell) you can set environment variables using the [set](https://docs.microsoft.com/en-us/windows-server/administration/windows-commands/set_1) command, e.g. `set TAGS=bindata`.
 
 ## Downloading and cloning the Gitea source code
 
@@ -132,7 +134,14 @@ See `make help` for all available `make` targets. Also see [`.drone.yml`](https:
 To run and continuously rebuild when source files change:
 
 ```bash
+# for both frontend and backend
 make watch
+
+# or: watch frontend files (html/js/css) only
+make watch-frontend
+
+# or: watch backend files (go) only
+make watch-backend
 ```
 
 On macOS, watching all backend source files may hit the default open files limit which can be increased via `ulimit -n 12288` for the current shell or in your shell startup file for all future shells.
@@ -167,7 +176,9 @@ make revive vet misspell-check
 
 ### Working on JS and CSS
 
-Either use the `watch-frontend` target mentioned above or just build once:
+Frontend development should follow [Guidelines for Frontend Development](./guidelines-frontend.md)
+
+To build with frontend resources, either use the `watch-frontend` target mentioned above or just build once:
 
 ```bash
 make build && ./gitea
@@ -187,7 +198,7 @@ SVG icons are built using the `make svg` target which compiles the icon sources 
 
 ### Building the Logo
 
-The PNG and SVG versions of the gitea logo are built from a single SVG source file `assets/logo.svg` using the `TAGS="gitea" make generate-images` target. To run it, Node.js and npm must be available. 
+The PNG and SVG versions of the Gitea logo are built from a single SVG source file `assets/logo.svg` using the `TAGS="gitea" make generate-images` target. To run it, Node.js and npm must be available. 
 
 The same process can also be used to generate custom logo PNGs from a SVG source file by updating `assets/logo.svg` and running `make generate-images`. Omitting the `gitea` tag will update only the user-designated logo files.
 
@@ -255,7 +266,7 @@ in `models/migrations/`. You can ensure that your migrations work for the main
 database types using:
 
 ```bash
-make test-sqlite-migration # with sqlite switched for the appropriate database
+make test-sqlite-migration # with SQLite switched for the appropriate database
 ```
 
 ## Testing
@@ -273,7 +284,7 @@ have written integration tests; however, these are database dependent.
 TAGS="bindata sqlite sqlite_unlock_notify" make build test-sqlite
 ```
 
-will run the integration tests in an sqlite environment. Integration tests
+will run the integration tests in an SQLite environment. Integration tests
 require `git lfs` to be installed. Other database tests are available but
 may need adjustment to the local environment.
 
@@ -299,7 +310,7 @@ make trans-copy clean build
 ```
 
 You will require a copy of [Hugo](https://gohugo.io/) to run this task. Please
-note: this may generate a number of untracked git objects, which will need to
+note: this may generate a number of untracked Git objects, which will need to
 be cleaned up.
 
 ## Visual Studio Code
@@ -312,12 +323,12 @@ for more information.
 ## GoLand
 
 Clicking the `Run Application` arrow on the function `func main()` in `/main.go` 
-can quickly start a debuggable gitea instance.
+can quickly start a debuggable Gitea instance.
 
 The `Output Directory` in `Run/Debug Configuration` MUST be set to the 
 gitea project directory (which contains `main.go` and `go.mod`), 
 otherwise, the started instance's working directory is a GoLand's temporary directory 
-and prevents gitea from loading dynamic resources (eg: templates) in a development environment.  
+and prevents Gitea from loading dynamic resources (eg: templates) in a development environment.  
 
 To run unit tests with SQLite in GoLand, set `-tags sqlite,sqlite_unlock_notify`
 in `Go tool arguments` of `Run/Debug Configuration`.

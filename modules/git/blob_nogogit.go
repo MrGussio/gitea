@@ -11,7 +11,6 @@ import (
 	"bufio"
 	"bytes"
 	"io"
-	"io/ioutil"
 	"math"
 
 	"code.gitea.io/gitea/modules/log"
@@ -30,7 +29,7 @@ type Blob struct {
 // DataAsync gets a ReadCloser for the contents of a blob without reading it all.
 // Calling the Close function on the result will discard all unread output.
 func (b *Blob) DataAsync() (io.ReadCloser, error) {
-	wr, rd, cancel := b.repo.CatFileBatch()
+	wr, rd, cancel := b.repo.CatFileBatch(b.repo.Ctx)
 
 	_, err := wr.Write([]byte(b.ID.String() + "\n"))
 	if err != nil {
@@ -46,13 +45,13 @@ func (b *Blob) DataAsync() (io.ReadCloser, error) {
 	b.size = size
 
 	if size < 4096 {
-		bs, err := ioutil.ReadAll(io.LimitReader(rd, size))
+		bs, err := io.ReadAll(io.LimitReader(rd, size))
 		defer cancel()
 		if err != nil {
 			return nil, err
 		}
 		_, err = rd.Discard(1)
-		return ioutil.NopCloser(bytes.NewReader(bs)), err
+		return io.NopCloser(bytes.NewReader(bs)), err
 	}
 
 	return &blobReader{
@@ -68,7 +67,7 @@ func (b *Blob) Size() int64 {
 		return b.size
 	}
 
-	wr, rd, cancel := b.repo.CatFileBatchCheck()
+	wr, rd, cancel := b.repo.CatFileBatchCheck(b.repo.Ctx)
 	defer cancel()
 	_, err := wr.Write([]byte(b.ID.String() + "\n"))
 	if err != nil {

@@ -5,21 +5,20 @@
 package oauth2
 
 import (
+	"encoding/gob"
 	"net/http"
 	"sync"
 
-	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/login"
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/sessions"
 	"github.com/markbates/goth/gothic"
 )
 
 var gothRWMutex = sync.RWMutex{}
-
-// SessionTableName is the table name that OAuth2 will use to store things
-const SessionTableName = "oauth2_session"
 
 // UsersStoreKey is the key for the store
 const UsersStoreKey = "gitea-oauth2-sessions"
@@ -33,23 +32,14 @@ func Init() error {
 		return err
 	}
 
-	store, err := models.CreateStore(SessionTableName, UsersStoreKey)
-	if err != nil {
-		return err
-	}
-
-	// according to the Goth lib:
-	// set the maxLength of the cookies stored on the disk to a larger number to prevent issues with:
-	// securecookie: the value is too long
-	// when using OpenID Connect , since this can contain a large amount of extra information in the id_token
-
-	// Note, when using the FilesystemStore only the session.ID is written to a browser cookie, so this is explicit for the storage on disk
-	store.MaxLength(setting.OAuth2.MaxTokenLength)
-
 	// Lock our mutex
 	gothRWMutex.Lock()
 
-	gothic.Store = store
+	gob.Register(&sessions.Session{})
+
+	gothic.Store = &SessionsStore{
+		maxLength: int64(setting.OAuth2.MaxTokenLength),
+	}
 
 	gothic.SetState = func(req *http.Request) string {
 		return uuid.New().String()
@@ -73,7 +63,7 @@ func ResetOAuth2() error {
 
 // initOAuth2LoginSources is used to load and register all active OAuth2 providers
 func initOAuth2LoginSources() error {
-	loginSources, _ := models.GetActiveOAuth2ProviderLoginSources()
+	loginSources, _ := login.GetActiveOAuth2ProviderLoginSources()
 	for _, source := range loginSources {
 		oauth2Source, ok := source.Cfg.(*Source)
 		if !ok {

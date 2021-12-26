@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/login"
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/base"
 	"code.gitea.io/gitea/modules/context"
 	"code.gitea.io/gitea/modules/json"
@@ -115,7 +117,7 @@ type AccessTokenResponse struct {
 	IDToken      string    `json:"id_token,omitempty"`
 }
 
-func newAccessTokenResponse(grant *models.OAuth2Grant, serverKey, clientKey oauth2.JWTSigningKey) (*AccessTokenResponse, *AccessTokenError) {
+func newAccessTokenResponse(grant *login.OAuth2Grant, serverKey, clientKey oauth2.JWTSigningKey) (*AccessTokenResponse, *AccessTokenError) {
 	if setting.OAuth2.InvalidateRefreshTokens {
 		if err := grant.IncreaseCounter(); err != nil {
 			return nil, &AccessTokenError{
@@ -162,16 +164,16 @@ func newAccessTokenResponse(grant *models.OAuth2Grant, serverKey, clientKey oaut
 	// generate OpenID Connect id_token
 	signedIDToken := ""
 	if grant.ScopeContains("openid") {
-		app, err := models.GetOAuth2ApplicationByID(grant.ApplicationID)
+		app, err := login.GetOAuth2ApplicationByID(grant.ApplicationID)
 		if err != nil {
 			return nil, &AccessTokenError{
 				ErrorCode:        AccessTokenErrorCodeInvalidRequest,
 				ErrorDescription: "cannot find application",
 			}
 		}
-		user, err := models.GetUserByID(grant.UserID)
+		user, err := user_model.GetUserByID(grant.UserID)
 		if err != nil {
-			if models.IsErrUserNotExist(err) {
+			if user_model.IsErrUserNotExist(err) {
 				return nil, &AccessTokenError{
 					ErrorCode:        AccessTokenErrorCodeInvalidRequest,
 					ErrorDescription: "cannot find user",
@@ -206,6 +208,17 @@ func newAccessTokenResponse(grant *models.OAuth2Grant, serverKey, clientKey oaut
 			idToken.Email = user.Email
 			idToken.EmailVerified = user.IsActive
 		}
+		if grant.ScopeContains("groups") {
+			groups, err := getOAuthGroupsForUser(user)
+			if err != nil {
+				log.Error("Error getting groups: %v", err)
+				return nil, &AccessTokenError{
+					ErrorCode:        AccessTokenErrorCodeInvalidRequest,
+					ErrorDescription: "server error",
+				}
+			}
+			idToken.Groups = groups
+		}
 
 		signedIDToken, err = idToken.SignToken(clientKey)
 		if err != nil {
@@ -226,20 +239,22 @@ func newAccessTokenResponse(grant *models.OAuth2Grant, serverKey, clientKey oaut
 }
 
 type userInfoResponse struct {
-	Sub      string `json:"sub"`
-	Name     string `json:"name"`
-	Username string `json:"preferred_username"`
-	Email    string `json:"email"`
-	Picture  string `json:"picture"`
+	Sub      string   `json:"sub"`
+	Name     string   `json:"name"`
+	Username string   `json:"preferred_username"`
+	Email    string   `json:"email"`
+	Picture  string   `json:"picture"`
+	Groups   []string `json:"groups"`
 }
 
 // InfoOAuth manages request for userinfo endpoint
 func InfoOAuth(ctx *context.Context) {
 	if ctx.User == nil || ctx.Data["AuthedMethod"] != (&auth.OAuth2{}).Name() {
 		ctx.Resp.Header().Set("WWW-Authenticate", `Bearer realm=""`)
-		ctx.HandleText(http.StatusUnauthorized, "no valid authorization")
+		ctx.PlainText(http.StatusUnauthorized, "no valid authorization")
 		return
 	}
+
 	response := &userInfoResponse{
 		Sub:      fmt.Sprint(ctx.User.ID),
 		Name:     ctx.User.FullName,
@@ -247,14 +262,46 @@ func InfoOAuth(ctx *context.Context) {
 		Email:    ctx.User.Email,
 		Picture:  ctx.User.AvatarLink(),
 	}
+
+	groups, err := getOAuthGroupsForUser(ctx.User)
+	if err != nil {
+		ctx.ServerError("Oauth groups for user", err)
+		return
+	}
+	response.Groups = groups
+
 	ctx.JSON(http.StatusOK, response)
+}
+
+// returns a list of "org" and "org:team" strings,
+// that the given user is a part of.
+func getOAuthGroupsForUser(user *user_model.User) ([]string, error) {
+	orgs, err := models.GetUserOrgsList(user)
+	if err != nil {
+		return nil, fmt.Errorf("GetUserOrgList: %v", err)
+	}
+
+	var groups []string
+	for _, org := range orgs {
+		groups = append(groups, org.Name)
+		teams, err := org.LoadTeams()
+		if err != nil {
+			return nil, fmt.Errorf("LoadTeams: %v", err)
+		}
+		for _, team := range teams {
+			if team.IsMember(user.ID) {
+				groups = append(groups, org.Name+":"+team.LowerName)
+			}
+		}
+	}
+	return groups, nil
 }
 
 // IntrospectOAuth introspects an oauth token
 func IntrospectOAuth(ctx *context.Context) {
 	if ctx.User == nil {
 		ctx.Resp.Header().Set("WWW-Authenticate", `Bearer realm=""`)
-		ctx.HandleText(http.StatusUnauthorized, "no valid authorization")
+		ctx.PlainText(http.StatusUnauthorized, "no valid authorization")
 		return
 	}
 
@@ -268,9 +315,9 @@ func IntrospectOAuth(ctx *context.Context) {
 	token, err := oauth2.ParseToken(form.Token, oauth2.DefaultSigningKey)
 	if err == nil {
 		if token.Valid() == nil {
-			grant, err := models.GetOAuth2GrantByID(token.GrantID)
+			grant, err := login.GetOAuth2GrantByID(token.GrantID)
 			if err == nil && grant != nil {
-				app, err := models.GetOAuth2ApplicationByID(grant.ApplicationID)
+				app, err := login.GetOAuth2ApplicationByID(grant.ApplicationID)
 				if err == nil && app != nil {
 					response.Active = true
 					response.Scope = grant.Scope
@@ -299,9 +346,9 @@ func AuthorizeOAuth(ctx *context.Context) {
 		return
 	}
 
-	app, err := models.GetOAuth2ApplicationByClientID(form.ClientID)
+	app, err := login.GetOAuth2ApplicationByClientID(form.ClientID)
 	if err != nil {
-		if models.IsErrOauthClientIDInvalid(err) {
+		if login.IsErrOauthClientIDInvalid(err) {
 			handleAuthorizeError(ctx, AuthorizeError{
 				ErrorCode:        ErrorCodeUnauthorizedClient,
 				ErrorDescription: "Client ID not registered",
@@ -312,8 +359,10 @@ func AuthorizeOAuth(ctx *context.Context) {
 		ctx.ServerError("GetOAuth2ApplicationByClientID", err)
 		return
 	}
-	if err := app.LoadUser(); err != nil {
-		ctx.ServerError("LoadUser", err)
+
+	user, err := user_model.GetUserByID(app.UID)
+	if err != nil {
+		ctx.ServerError("GetUserByID", err)
 		return
 	}
 
@@ -406,7 +455,7 @@ func AuthorizeOAuth(ctx *context.Context) {
 	ctx.Data["State"] = form.State
 	ctx.Data["Scope"] = form.Scope
 	ctx.Data["Nonce"] = form.Nonce
-	ctx.Data["ApplicationUserLink"] = "<a href=\"" + html.EscapeString(setting.AppURL) + html.EscapeString(url.PathEscape(app.User.LowerName)) + "\">@" + html.EscapeString(app.User.Name) + "</a>"
+	ctx.Data["ApplicationUserLink"] = "<a href=\"" + html.EscapeString(user.HTMLURL()) + "\">@" + html.EscapeString(user.Name) + "</a>"
 	ctx.Data["ApplicationRedirectDomainHTML"] = "<strong>" + html.EscapeString(form.RedirectURI) + "</strong>"
 	// TODO document SESSION <=> FORM
 	err = ctx.Session.Set("client_id", app.ClientID)
@@ -443,7 +492,7 @@ func GrantApplicationOAuth(ctx *context.Context) {
 		ctx.Error(http.StatusBadRequest)
 		return
 	}
-	app, err := models.GetOAuth2ApplicationByClientID(form.ClientID)
+	app, err := login.GetOAuth2ApplicationByClientID(form.ClientID)
 	if err != nil {
 		ctx.ServerError("GetOAuth2ApplicationByClientID", err)
 		return
@@ -581,7 +630,7 @@ func handleRefreshToken(ctx *context.Context, form forms.AccessTokenForm, server
 		return
 	}
 	// get grant before increasing counter
-	grant, err := models.GetOAuth2GrantByID(token.GrantID)
+	grant, err := login.GetOAuth2GrantByID(token.GrantID)
 	if err != nil || grant == nil {
 		handleAccessTokenError(ctx, AccessTokenError{
 			ErrorCode:        AccessTokenErrorCodeInvalidGrant,
@@ -608,7 +657,7 @@ func handleRefreshToken(ctx *context.Context, form forms.AccessTokenForm, server
 }
 
 func handleAuthorizationCode(ctx *context.Context, form forms.AccessTokenForm, serverKey, clientKey oauth2.JWTSigningKey) {
-	app, err := models.GetOAuth2ApplicationByClientID(form.ClientID)
+	app, err := login.GetOAuth2ApplicationByClientID(form.ClientID)
 	if err != nil {
 		handleAccessTokenError(ctx, AccessTokenError{
 			ErrorCode:        AccessTokenErrorCodeInvalidClient,
@@ -630,7 +679,7 @@ func handleAuthorizationCode(ctx *context.Context, form forms.AccessTokenForm, s
 		})
 		return
 	}
-	authorizationCode, err := models.GetOAuth2AuthorizationByCode(form.Code)
+	authorizationCode, err := login.GetOAuth2AuthorizationByCode(form.Code)
 	if err != nil || authorizationCode == nil {
 		handleAccessTokenError(ctx, AccessTokenError{
 			ErrorCode:        AccessTokenErrorCodeUnauthorizedClient,
@@ -674,7 +723,7 @@ func handleAccessTokenError(ctx *context.Context, acErr AccessTokenError) {
 	ctx.JSON(http.StatusBadRequest, acErr)
 }
 
-func handleServerError(ctx *context.Context, state string, redirectURI string) {
+func handleServerError(ctx *context.Context, state, redirectURI string) {
 	handleAuthorizeError(ctx, AuthorizeError{
 		ErrorCode:        ErrorCodeServerError,
 		ErrorDescription: "A server error occurred",

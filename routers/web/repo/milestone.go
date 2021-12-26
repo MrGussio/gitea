@@ -6,9 +6,11 @@ package repo
 
 import (
 	"net/http"
+	"net/url"
 	"time"
 
 	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/db"
 	"code.gitea.io/gitea/modules/base"
 	"code.gitea.io/gitea/modules/context"
 	"code.gitea.io/gitea/modules/markup"
@@ -59,7 +61,7 @@ func Milestones(ctx *context.Context) {
 	}
 
 	miles, total, err := models.GetMilestones(models.GetMilestonesOption{
-		ListOptions: models.ListOptions{
+		ListOptions: db.ListOptions{
 			Page:     page,
 			PageSize: setting.UI.IssuePagingNum,
 		},
@@ -243,7 +245,7 @@ func ChangeMilestoneStatus(ctx *context.Context) {
 		}
 		return
 	}
-	ctx.Redirect(ctx.Repo.RepoLink + "/milestones?state=" + ctx.Params(":action"))
+	ctx.Redirect(ctx.Repo.RepoLink + "/milestones?state=" + url.QueryEscape(ctx.Params(":action")))
 }
 
 // DeleteMilestone delete a milestone

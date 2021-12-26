@@ -11,7 +11,7 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"io/ioutil"
+	"strings"
 
 	"code.gitea.io/gitea/modules/analyze"
 	"code.gitea.io/gitea/modules/log"
@@ -47,14 +47,14 @@ func (repo *Repository) GetLanguageStats(commitID string) (map[string]int64, err
 	var checker *CheckAttributeReader
 
 	if CheckGitVersionAtLeast("1.7.8") == nil {
-		indexFilename, deleteTemporaryFile, err := repo.ReadTreeToTemporaryIndex(commitID)
+		indexFilename, workTree, deleteTemporaryFile, err := repo.ReadTreeToTemporaryIndex(commitID)
 		if err == nil {
 			defer deleteTemporaryFile()
-
 			checker = &CheckAttributeReader{
-				Attributes: []string{"linguist-vendored", "linguist-generated", "linguist-language"},
+				Attributes: []string{"linguist-vendored", "linguist-generated", "linguist-language", "gitlab-language"},
 				Repo:       repo,
 				IndexFile:  indexFilename,
+				WorkTree:   workTree,
 			}
 			ctx, cancel := context.WithCancel(DefaultContext)
 			if err := checker.Init(ctx); err != nil {
@@ -99,13 +99,28 @@ func (repo *Repository) GetLanguageStats(commitID string) (map[string]int64, err
 				if language, has := attrs["linguist-language"]; has && language != "unspecified" && language != "" {
 					// group languages, such as Pug -> HTML; SCSS -> CSS
 					group := enry.GetLanguageGroup(language)
-					if len(group) == 0 {
+					if len(group) != 0 {
 						language = group
 					}
 
 					sizes[language] += f.Size
 
 					return nil
+				} else if language, has := attrs["gitlab-language"]; has && language != "unspecified" && language != "" {
+					// strip off a ? if present
+					if idx := strings.IndexByte(language, '?'); idx >= 0 {
+						language = language[:idx]
+					}
+					if len(language) != 0 {
+						// group languages, such as Pug -> HTML; SCSS -> CSS
+						group := enry.GetLanguageGroup(language)
+						if len(group) != 0 {
+							language = group
+						}
+
+						sizes[language] += f.Size
+						return nil
+					}
 				}
 			}
 		}
@@ -166,7 +181,7 @@ func readFile(f *object.File, limit int64) ([]byte, error) {
 	defer r.Close()
 
 	if limit <= 0 {
-		return ioutil.ReadAll(r)
+		return io.ReadAll(r)
 	}
 
 	size := f.Size
