@@ -110,6 +110,47 @@ const (
 	CommentTypeChangeIssueRef
 )
 
+var commentStrings = []string{
+	"comment",
+	"reopen",
+	"close",
+	"issue_ref",
+	"commit_ref",
+	"comment_ref",
+	"pull_ref",
+	"label",
+	"milestone",
+	"assignees",
+	"change_title",
+	"delete_branch",
+	"start_tracking",
+	"stop_tracking",
+	"add_time_manual",
+	"cancel_tracking",
+	"added_deadline",
+	"modified_deadline",
+	"removed_deadline",
+	"add_dependency",
+	"remove_dependency",
+	"code",
+	"review",
+	"lock",
+	"unlock",
+	"change_target_branch",
+	"delete_time_manual",
+	"review_request",
+	"merge_pull",
+	"pull_push",
+	"project",
+	"project_board",
+	"dismiss_review",
+	"change_issue_ref",
+}
+
+func (t CommentType) String() string {
+	return commentStrings[t]
+}
+
 // RoleDescriptor defines comment tag type
 type RoleDescriptor int
 
@@ -794,13 +835,12 @@ func updateCommentInfos(ctx context.Context, opts *CreateCommentOptions, comment
 			}
 		}
 		fallthrough
-	case CommentTypeReview:
-		fallthrough
 	case CommentTypeComment:
 		if _, err = e.Exec("UPDATE `issue` SET num_comments=num_comments+1 WHERE id=?", opts.Issue.ID); err != nil {
 			return err
 		}
-
+		fallthrough
+	case CommentTypeReview:
 		// Check attachments
 		attachments, err := repo_model.GetAttachmentsByUUIDs(ctx, opts.Attachments)
 		if err != nil {
